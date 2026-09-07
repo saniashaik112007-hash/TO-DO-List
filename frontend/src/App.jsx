@@ -19,12 +19,31 @@ function formatDate(date) {
 	}).format(date);
 }
 
-function formatTime(time) {
+function getMeridiemForTime(time) {
+	if (!time) return "AM";
+	const [hour] = time.split(":").map(Number);
+	return hour >= 12 ? "PM" : "AM";
+}
+
+function formatTime(time, meridiem) {
 	if (!time) return "Anytime";
-	const [hour, minute] = time.split(":");
-	const date = new Date();
-	date.setHours(Number(hour), Number(minute));
-	return new Intl.DateTimeFormat("en-US", { hour: "numeric", minute: "2-digit" }).format(date);
+	const [hour, minute] = time.split(":").map(Number);
+	const suffix = meridiem || getMeridiemForTime(time);
+	let displayHour = hour % 12;
+	if (displayHour === 0) displayHour = 12;
+	return `${displayHour}:${String(minute).padStart(2, "0")} ${suffix}`;
+}
+
+function getDueDateFromTask(task) {
+	if (!task || !task.dueTime) return null;
+	const [hours, minutes] = task.dueTime.split(":").map(Number);
+	const meridiem = task.meridiem || getMeridiemForTime(task.dueTime);
+	const due = new Date();
+	let adjustedHour = hours;
+	if (meridiem === "PM" && adjustedHour < 12) adjustedHour += 12;
+	if (meridiem === "AM" && adjustedHour === 12) adjustedHour = 0;
+	due.setHours(adjustedHour, minutes, 0, 0);
+	return due;
 }
 
 function App() {
@@ -38,7 +57,7 @@ function App() {
 	const [filter, setFilter] = useState("all");
 	const [showForm, setShowForm] = useState(false);
 	const [remindersOn, setRemindersOn] = useState(false);
-	const [form, setForm] = useState({ title: "", dueTime: "" });
+	const [form, setForm] = useState({ title: "", dueTime: "", meridiem: "AM" });
 	const today = getToday();
 
 	useEffect(() => {
@@ -56,15 +75,21 @@ function App() {
 
 	useEffect(() => {
 		const checkReminders = () => {
-			if (!remindersOn || !("Notification" in window) || Notification.permission !== "granted") return;
+			if (!remindersOn || !tasks.length) return;
 			const now = Date.now();
 			tasks.forEach((task) => {
 				if (task.date !== today || task.completed || !task.dueTime || task.reminded) return;
-				const [hours, minutes] = task.dueTime.split(":").map(Number);
-				const due = new Date();
-				due.setHours(hours, minutes, 0, 0);
+				const due = getDueDateFromTask(task);
+				if (!due) return;
 				if (due.getTime() >= now && due.getTime() - now <= REMINDER_WINDOW) {
-					new Notification(`Coming up: ${task.title}`, { body: `This task is due at ${formatTime(task.dueTime)}.` });
+					const message = `This task is due at ${formatTime(task.dueTime, task.meridiem || getMeridiemForTime(task.dueTime))}.`;
+					if ("Notification" in window && Notification.permission === "granted") {
+						new Notification(`Coming up: ${task.title}`, { body: message });
+					} else {
+						if (typeof window !== "undefined") {
+							window.alert(`Coming up: ${task.title}\n${message}`);
+						}
+					}
 					updateTask(task._id, { reminded: true }).catch(() => {});
 					setTasks((current) => current.map((item) => (item._id === task._id ? { ...item, reminded: true } : item)));
 				}
@@ -99,9 +124,15 @@ function App() {
 		event.preventDefault();
 		if (!form.title.trim()) return;
 		try {
-			const task = await createTask({ ...form, title: form.title.trim(), date: today, studentId: student._id });
+			const task = await createTask({
+				...form,
+				title: form.title.trim(),
+				date: today,
+				studentId: student._id,
+				meridiem: form.meridiem,
+			});
 			setTasks((current) => [...current, task]);
-			setForm({ title: "", dueTime: "" });
+			setForm({ title: "", dueTime: "", meridiem: "AM" });
 			setShowForm(false);
 		} catch {
 			setError("That task could not be saved. Please check the backend connection.");
@@ -156,9 +187,9 @@ function App() {
 
 				<section className="tasks-section">
 					<div className="section-heading"><div><h2>Today's tasks</h2><p>{todayTasks.length ? "Keep going, one task at a time." : "Your day is ready for a fresh start."}</p></div><button className="add-button" onClick={() => setShowForm((current) => !current)}><span>+</span> Add task</button></div>
-					{showForm && <form className="task-form" onSubmit={addTask}><input autoFocus placeholder="What needs to get done?" value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} /><input type="time" aria-label="Due time" value={form.dueTime} onChange={(event) => setForm({ ...form, dueTime: event.target.value })} /><button type="submit">Save task</button></form>}
+					{showForm && <form className="task-form" onSubmit={addTask}><input autoFocus placeholder="What needs to get done?" value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} /><div className="time-group"><input type="time" aria-label="Due time" value={form.dueTime} onChange={(event) => setForm({ ...form, dueTime: event.target.value })} /><select aria-label="AM or PM" value={form.meridiem} onChange={(event) => setForm({ ...form, meridiem: event.target.value })}><option value="AM">AM</option><option value="PM">PM</option></select></div><button type="submit">Save task</button></form>}
 					<div className="filter-row"><div className="filters">{[["all", "All tasks"], ["open", "To do"], ["completed", "Completed"]].map(([key, label]) => <button key={key} className={filter === key ? "selected" : ""} onClick={() => setFilter(key)}>{label}{key === "all" && <span>{todayTasks.length}</span>}</button>)}</div><span className="task-count">{visibleTasks.length} shown</span></div>
-					<div className="task-list">{loading ? <div className="empty-state"><h3>Loading your tasks...</h3></div> : visibleTasks.length ? visibleTasks.map((task) => <article className={`task-card ${task.completed ? "done" : ""}`} key={task._id}><button className="check-button" aria-label={`Mark ${task.title} as ${task.completed ? "incomplete" : "complete"}`} onClick={() => toggleTask(task._id)}>{task.completed ? "✓" : ""}</button><div className="task-details"><h3>{task.title}</h3><div>{task.dueTime ? <><span className="clock">◷</span>{formatTime(task.dueTime)}</> : "No time set"}</div></div><span className={`task-status ${task.completed ? "complete" : "upcoming"}`}>{task.completed ? "Done" : "Upcoming"}</span><button className="delete-button" aria-label={`Delete ${task.title}`} onClick={() => deleteTask(task._id)}>×</button></article>) : <div className="empty-state"><span>✦</span><h3>No tasks in this view</h3><p>Add a task and give your day some direction.</p></div>}</div>
+					<div className="task-list">{loading ? <div className="empty-state"><h3>Loading your tasks...</h3></div> : visibleTasks.length ? visibleTasks.map((task) => <article className={`task-card ${task.completed ? "done" : ""}`} key={task._id}><button className="check-button" aria-label={`Mark ${task.title} as ${task.completed ? "incomplete" : "complete"}`} onClick={() => toggleTask(task._id)}>{task.completed ? "✓" : ""}</button><div className="task-details"><h3>{task.title}</h3><div>{task.dueTime ? <><span className="clock">◷</span>{formatTime(task.dueTime, task.meridiem || getMeridiemForTime(task.dueTime))}</> : "No time set"}</div></div><span className={`task-status ${task.completed ? "complete" : "upcoming"}`}>{task.completed ? "Done" : "Upcoming"}</span><button className="delete-button" aria-label={`Delete ${task.title}`} onClick={() => deleteTask(task._id)}>×</button></article>) : <div className="empty-state"><span>✦</span><h3>No tasks in this view</h3><p>Add a task and give your day some direction.</p></div>}</div>
 				</section>
 			</section>
 		</main>
